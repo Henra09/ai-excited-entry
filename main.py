@@ -1,423 +1,267 @@
 #!/usr/bin/env python3
-"""Generate /output/entry.png: 'The Breach' — a whale of pure light arcing
-over a moonlit sea at the instant its glowing nose tears the water open.
-Pure procedural art. Deterministic (fixed seed), no network, Pillow only.
+"""The Breach - a whale made of light breaching over a moonlit night sea.
+
+Purely procedural, deterministic Pillow art for make.fun bounty ai-excited-01.
+Writes a single 1024x1024 PNG to /output/entry.png (<1 MiB).
 """
 import math
 import os
 import random
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-SIZE = 1024
-SS = 2  # supersample factor
-RND = random.Random(20261116)
-
-# whale spine control points (fractions of w/h) — nose low-left, back high
-P0 = (0.13, 0.60)
-P1 = (0.05, 0.30)
-P2 = (0.44, 0.10)
-P3 = (0.74, 0.30)
+W = H = 1024
+HORIZON = int(H * 0.56)
+rng = random.Random(20261116)
 
 
-def mix(c1, c2, t):
-    return tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
+def lerp(a, b, t):
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
-def bezier(p0, p1, p2, p3, t):
-    mt = 1 - t
-    return (mt**3 * p0[0] + 3 * mt**2 * t * p1[0] + 3 * mt * t**2 * p2[0] + t**3 * p3[0],
-            mt**3 * p0[1] + 3 * mt**2 * t * p1[1] + 3 * mt * t**2 * p2[1] + t**3 * p3[1])
-
-
-def bez_width(t):
-    """Half-width of the body along the spine (in 1024-units)."""
-    base = 120 * (math.sin(math.pi * (0.06 + 0.94 * t)) ** 0.85)
-    return base * (1.0 - 0.45 * t)
-
-
-def body_geometry(w, h):
-    p0 = (P0[0] * w, P0[1] * h)
-    p1 = (P1[0] * w, P1[1] * h)
-    p2 = (P2[0] * w, P2[1] * h)
-    p3 = (P3[0] * w, P3[1] * h)
-    N = 260
-    spine = [bezier(p0, p1, p2, p3, i / N) for i in range(N + 1)]
-    tangents = []
-    for i in range(N + 1):
-        a = max(0, i - 1); b = min(N, i + 1)
-        tx = spine[b][0] - spine[a][0]; ty = spine[b][1] - spine[a][1]
-        n = math.hypot(tx, ty) or 1.0
-        tangents.append((tx / n, ty / n))
-    S = w / 1024.0
-    top, bot = [], []
-    for i in range(N + 1):
-        t = i / N
-        x, y = spine[i]
-        tx, ty = tangents[i]
-        hw = bez_width(t) * S
-        top.append((x - ty * hw, y + tx * hw))
-        bot.append((x + ty * hw, y - tx * hw))
-    return spine, tangents, top, bot, p0, p3
-
-
-def sky_gradient(w, h):
-    img = Image.new("RGB", (w, h))
+def vgrad(size, stops):
+    """Vertical gradient image from color stops [(y_frac, rgb), ...]."""
+    w, h = size
+    img = Image.new("RGB", (1, h))
     px = img.load()
-    top, mid, horizon = (5, 7, 22), (13, 28, 56), (24, 88, 90)
     for y in range(h):
         t = y / (h - 1)
-        c = mix(top, mid, t / 0.62) if t < 0.62 else mix(mid, horizon, (t - 0.62) / 0.38)
-        for x in range(w):
-            px[x, y] = c
-    return img
+        for i in range(len(stops) - 1):
+            y0, c0 = stops[i]
+            y1, c1 = stops[i + 1]
+            if y0 <= t <= y1:
+                f = (t - y0) / max(1e-6, (y1 - y0))
+                px[0, y] = lerp(c0, c1, f)
+                break
+        else:
+            px[0, y] = stops[-1][1]
+    return img.resize((w, h), Image.BILINEAR)
 
 
-def draw_stars(w, h, horizon_y):
-    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    for _ in range(560):
-        x = RND.uniform(0, w); y = RND.uniform(0, horizon_y * 0.97)
-        r = RND.uniform(0.6, 2.2)
-        bright = RND.uniform(0.25, 1.0) * (1.0 - 0.55 * y / horizon_y)
-        if RND.random() < 0.06:
-            r *= 1.8; bright = min(1.0, bright + 0.35)
-        a = int(255 * max(0.05, bright))
-        d.ellipse([x - r, y - r, x + r, y + r], fill=(230, 240, 255, a))
-    return layer
+def add_glow(img, layer, strength):
+    """Screen-blend a glowing black-background layer onto img."""
+    lit = ImageChops.screen(img, layer)
+    return Image.blend(img, lit, strength)
 
 
-def draw_moon(w, h):
-    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    mx, my, mr = w * 0.80, h * 0.15, w * 0.042
-    for i in range(14):
-        rr = mr + i * mr * 0.5
-        a = int(26 * (1 - i / 14) ** 2)
-        d.ellipse([mx - rr, my - rr, mx + rr, my + rr], fill=(180, 210, 235, a))
-    d.ellipse([mx - mr, my - mr, mx + mr, my + mr], fill=(238, 244, 252, 255))
-    for cx, cy, cr in [(-0.3, -0.2, 0.22), (0.25, 0.1, 0.16), (-0.05, 0.35, 0.12)]:
-        cxx, cyy = mx + cx * mr, my + cy * mr
-        d.ellipse([cxx - cr * mr, cyy - cr * mr, cxx + cr * mr, cyy + cr * mr],
-                  fill=(208, 218, 230, 255))
-    return layer.filter(ImageFilter.GaussianBlur(SS))
+def whale_path(t):
+    """Parametric whale spine: 0=tail tip, 1=snout. Returns (x, y)."""
+    x = 190 + 700 * t
+    y = 610 - 330 * math.sin(math.pi * (t ** 0.85)) - 90 * t
+    return x, y
 
 
-def aurora_ribbons(w, h, horizon_y):
-    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    palettes = [
-        [(60, 255, 170), (120, 255, 200), (40, 200, 230)],
-        [(150, 90, 255), (90, 130, 255), (200, 120, 255)],
-    ]
-    for pi, colors in enumerate(palettes):
-        base_y = horizon_y * (0.40 if pi == 0 else 0.24)
-        amp = h * (0.10 if pi == 0 else 0.07)
-        freq = RND.uniform(1.6, 2.4)
-        phase = RND.uniform(0, 6.28)
-        tilt = -0.10 if pi == 0 else -0.04
-        for s in range(46):
-            t = s / 46
-            col = colors[s % len(colors)]
-            alpha = int(30 * math.sin(t * math.pi) + 8)
-            offset = t * h * 0.16
-            pts = []
-            for x in range(0, w + 12, 12):
-                y = (base_y + offset + tilt * x
-                     + amp * math.sin(phase + x / w * freq * 2 * math.pi)
-                     + amp * 0.4 * math.sin(phase * 1.7 + x / w * 5.1))
-                pts.append((x, y))
-            d.line(pts, fill=col + (alpha,), width=int((26 - 20 * t) * SS),
-                   joint="curve")
-    return layer.filter(ImageFilter.GaussianBlur(10 * SS))
+def whale_normal(t):
+    """Unit normal of the spine at parameter t, pointing to the upper side."""
+    e = 0.01
+    x0, y0 = whale_path(max(0, t - e))
+    x1, y1 = whale_path(min(1, t + e))
+    dx, dy = x1 - x0, y1 - y0
+    L = math.hypot(dx, dy) or 1
+    nx, ny = dy / L, -dx / L
+    if ny > 0:
+        nx, ny = -nx, -ny
+    return nx, ny
 
 
-def whale(w, h, horizon_y):
-    """Luminous whale: smooth gradient body, dark belly, grooves, eye,
-    downward-flicking fluke, sweeping pectoral fin."""
-    S = w / 1024.0
-    spine, tangents, top, bot, p0, p3 = body_geometry(w, h)
-    N = len(spine) - 1
-
-    body = Image.new("L", (w, h), 0)
-    bd = ImageDraw.Draw(body)
-    bd.polygon(top + bot[::-1], fill=255)
-    r0 = bez_width(0.0) * S
-    bd.ellipse([p0[0] - r0, p0[1] - r0, p0[0] + r0, p0[1] + r0], fill=255)
-
-    # fluke: two curved lobes (tapered bezier strokes) flicking down-right,
-    # grown from the tail tip so they stay attached
-    tx, ty = tangents[-1]
-    nx, ny = -ty, tx
-    ex, ey = spine[-1]
-    c, s_ = math.cos(math.radians(30)), math.sin(math.radians(30))
-    dx = tx * c - ty * s_; dy = tx * s_ + ty * c
-    ext, spread = 160 * S, 110 * S
-    stemx, stemy = ex + dx * ext * 0.10, ey + dy * ext * 0.10
-    for sign in (1, -1):
-        lobe_end = (stemx + dx * ext * 0.90 + nx * spread * sign,
-                    stemy + dy * ext * 0.90 + ny * spread * sign)
-        bend = (stemx + dx * ext * 0.60 + nx * spread * 1.05 * sign,
-                stemy + dy * ext * 0.60 + ny * spread * 1.05 * sign)
-        lobe = [bezier((stemx, stemy), bend,
-                       (lobe_end[0] - dx * 20 * S, lobe_end[1] - dy * 20 * S),
-                       lobe_end, i / 40) for i in range(41)]
-        lw_ = [26 * S, 48 * S, 34 * S, 8 * S]
-        lobe_poly = []
-        for i in range(41):
-            t = i / 40
-            hw = (lw_[0] * (1 - t) ** 3 + 3 * (1 - t) ** 2 * t * lw_[1]
-                  + 3 * (1 - t) * t**2 * lw_[2] + t**3 * lw_[3])
-            tx2 = lobe[min(40, i + 1)][0] - lobe[max(0, i - 1)][0]
-            ty2 = lobe[min(40, i + 1)][1] - lobe[max(0, i - 1)][1]
-            n2 = math.hypot(tx2, ty2) or 1
-            lobe_poly.append((lobe[i][0] - ty2 / n2 * hw, lobe[i][1] + tx2 / n2 * hw))
-        for i in range(40, -1, -1):
-            t = i / 40
-            hw = ((lw_[0] * (1 - t) ** 3 + 3 * (1 - t) ** 2 * t * lw_[1]
-                   + 3 * (1 - t) * t**2 * lw_[2] + t**3 * lw_[3]) * 0.25)
-            tx2 = lobe[min(40, i + 1)][0] - lobe[max(0, i - 1)][0]
-            ty2 = lobe[min(40, i + 1)][1] - lobe[max(0, i - 1)][1]
-            n2 = math.hypot(tx2, ty2) or 1
-            lobe_poly.append((lobe[i][0] + ty2 / n2 * hw, lobe[i][1] - tx2 / n2 * hw))
-        bd.polygon(lobe_poly, fill=255)
-
-    # small dorsal fin bump on the back
-    di = 0.55
-    dxp, dyp = spine[int(di * N)]
-    dtx, dty = tangents[int(di * N)]
-    dnx, dny = -dty, dtx
-    hw_d = bez_width(di) * S
-    bd.polygon([(dxp + dtx * 16 * S - dnx * hw_d * 0.96, dyp + dty * 16 * S - dny * hw_d * 0.96),
-                (dxp - dnx * (hw_d + 42 * S), dyp - dny * (hw_d + 42 * S)),
-                (dxp - dtx * 30 * S - dnx * hw_d * 0.9, dyp - dty * 30 * S - dny * hw_d * 0.9)],
-               fill=255)
-
-    # pectoral fin: long curved sweep from the lower body, trailing back
-    fi = 0.28
-    fx, fy = spine[int(fi * N)]
-    ftx, fty = tangents[int(fi * N)]
-    fnx, fny = -fty, ftx
-    fp0 = (fx + fnx * bez_width(fi) * S * 0.8, fy + fny * bez_width(fi) * S * 0.8)
-    fp1 = (fp0[0] + fnx * 70 * S + ftx * 110 * S, fp0[1] + fny * 70 * S + fty * 110 * S)
-    fp2 = (fp0[0] + fnx * 110 * S + ftx * 240 * S, fp0[1] + fny * 110 * S + fty * 240 * S)
-    fp3 = (fp0[0] + fnx * 30 * S + ftx * 380 * S, fp0[1] + fny * 30 * S + fty * 380 * S)
-    finc = [bezier(fp0, fp1, fp2, fp3, i / 40) for i in range(41)]
-    fw = [10 * S, 26 * S, 18 * S, 6 * S]
-    fin_poly = []
-    for i in range(41):
-        t = i / 40
-        hw = (fw[0] * (1 - t) ** 3 + 3 * (1 - t) ** 2 * t * fw[1]
-              + 3 * (1 - t) * t**2 * fw[2] + t**3 * fw[3])
-        tx2 = finc[min(40, i + 1)][0] - finc[max(0, i - 1)][0]
-        ty2 = finc[min(40, i + 1)][1] - finc[max(0, i - 1)][1]
-        n2 = math.hypot(tx2, ty2) or 1
-        fin_poly.append((finc[i][0] - ty2 / n2 * hw, finc[i][1] + tx2 / n2 * hw))
-    for i in range(40, -1, -1):
-        t = i / 40
-        hw = ((fw[0] * (1 - t) ** 3 + 3 * (1 - t) ** 2 * t * fw[1]
-               + 3 * (1 - t) * t**2 * fw[2] + t**3 * fw[3]) * 0.3)
-        tx2 = finc[min(40, i + 1)][0] - finc[max(0, i - 1)][0]
-        ty2 = finc[min(40, i + 1)][1] - finc[max(0, i - 1)][1]
-        n2 = math.hypot(tx2, ty2) or 1
-        fin_poly.append((finc[i][0] + ty2 / n2 * hw, finc[i][1] - tx2 / n2 * hw))
-    bd.polygon(fin_poly, fill=255)
-
-    # ---- smooth gradient fill: painted at low res along the spine,
-    # blurred, upscaled, masked by the body ----
-    low = 200
-    g = Image.new("RGB", (low, low), (18, 90, 150))
-    gd = ImageDraw.Draw(g)
-    sc = low / w
-    for i in range(0, N + 1, 1):
-        t = i / N
-        x, y = spine[i]
-        tx, ty = tangents[i]
-        hw = bez_width(t) * S
-        # 0 = back/top edge (hot, glowing) -> 1 = belly (deep teal)
-        # flicker of light pulses running along the body
-        pulse = 0.5 + 0.5 * math.sin(t * 21 - 1.2)
-        hot = mix((255, 250, 235), (90, 200, 255), pulse * 0.45)
-        col_back = mix(hot, (30, 110, 185), min(1.0, t * 1.15 + 0.1))
-        col_belly = mix((60, 160, 235), (12, 55, 100), 0.65)
-        # back stroke (slightly outside the spine, on the top side)
-        gd.line([(x * sc - ty * hw * sc, y * sc + tx * hw * sc),
-                 (x * sc, y * sc)], fill=col_back, width=3)
-        # belly stroke (bottom side)
-        gd.line([(x * sc, y * sc),
-                 (x * sc + ty * hw * sc, y * sc - tx * hw * sc)],
-                fill=col_belly, width=3)
-    hx, hy = spine[int(0.06 * N)]
-    gd.ellipse([hx * sc - 14, hy * sc - 14, hx * sc + 14, hy * sc + 14],
-               fill=(255, 255, 245))
-    g = g.filter(ImageFilter.GaussianBlur(6))
-    grad = g.resize((w, h), Image.BILINEAR)
-    fill = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    fill.paste(grad, mask=body)
-
-    # throat grooves: dark curved lines along the belly of the front half
-    grooves = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    gdr = ImageDraw.Draw(grooves)
-    for k in range(1, 5):
-        off = 0.45 + 0.11 * k
-        pts = []
-        for i in range(int(0.03 * N), int(0.48 * N), 4):
-            t = i / N
-            x, y = spine[i]
-            tx, ty = tangents[i]
-            hw = bez_width(t) * S
-            pts.append((x - ty * hw * off, y + tx * hw * off))
-        gdr.line(pts, fill=(8, 40, 75, 140), width=max(1, int(2.0 * S)))
-    grooves = grooves.filter(ImageFilter.GaussianBlur(1.5 * SS))
-
-    # eye: set back on the head, upper side, clear of the splash
-    eye = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    ed = ImageDraw.Draw(eye)
-    ei = 0.14
-    ex_, ey_ = spine[int(ei * N)]
-    etx, ety = tangents[int(ei * N)]
-    er = 8 * S
-    ecx = ex_ - ety * bez_width(ei) * S * 0.30
-    ecy = ey_ + etx * bez_width(ei) * S * 0.30
-    ed.ellipse([ecx - er, ecy - er, ecx + er, ecy + er], fill=(8, 30, 55, 255))
-    ed.ellipse([ecx - er * 0.45, ecy - er * 0.45, ecx + er * 0.15, ecy + er * 0.15],
-               fill=(220, 245, 255, 255))
-    mpts = []
-    for i in range(0, int(0.20 * N), 3):
-        t = i / N
-        x, y = spine[i]
-        tx, ty = tangents[i]
-        hw = bez_width(t) * S * 0.72
-        mpts.append((x - ty * hw, y + tx * hw))
-    ed.line(mpts, fill=(10, 40, 70, 190), width=max(1, int(2.5 * S)))
-
-    # outer rim light
-    edge = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    edge.paste((150, 240, 255, 210), mask=body)
-    edge = edge.filter(ImageFilter.GaussianBlur(4.0 * SS))
-
-    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    layer = Image.alpha_composite(layer, edge)
-    layer = Image.alpha_composite(layer, fill)
-    layer = Image.alpha_composite(layer, grooves)
-    layer = Image.alpha_composite(layer, eye)
-    return layer
+def thickness(t):
+    return 24 + 78 * math.sin(math.pi * min(1.0, t * 1.08)) ** 0.65
 
 
-def splash(w, h, horizon_y):
-    """Luminous splash crown where the nose tears the water."""
-    S = w / 1024.0
-    nx0, ny0 = P0[0] * w, P0[1] * h
-
-    sheets = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    sd = ImageDraw.Draw(sheets)
-    for k in range(9):
-        a0 = math.radians(200 + k * 18 + RND.uniform(-6, 6))
-        ln = RND.uniform(140, 300) * S
-        bend = RND.uniform(-0.5, 0.9)
-        pts = []
-        for i in range(26):
-            t = i / 25
-            r = t * ln
-            a = a0 + bend * t
-            pts.append((nx0 + r * math.cos(a), ny0 + r * math.sin(a)))
-        sd.line(pts, fill=(200, 245, 255, int(120 * math.sin((k + 1) / 10 * math.pi) + 40)),
-                width=max(1, int((9 - 6 * (k / 9)) * S)), joint="curve")
-    sheets = sheets.filter(ImageFilter.GaussianBlur(1.6 * SS))
-
-    drops = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    dd = ImageDraw.Draw(drops)
-    for _ in range(900):
-        a = RND.uniform(math.radians(190), math.radians(345))
-        rr = (RND.uniform(0, 1) ** 0.7) * 240 * S
-        x = nx0 + rr * math.cos(a); y = ny0 + rr * math.sin(a) * 0.92
-        if y > horizon_y * 0.99 or x < 0 or x > w or y < 0:
-            continue
-        r = RND.uniform(1.0, 3.6) * S
-        col = mix((140, 225, 255), (255, 255, 255), RND.random() ** 1.5)
-        al = int(220 * (1 - rr / (260 * S)) ** 1.2 + 15)
-        dd.ellipse([x - r, y - r, x + r, y + r], fill=col + (min(255, al),))
-    drops = drops.filter(ImageFilter.GaussianBlur(0.7 * SS))
-
-    core = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    cd = ImageDraw.Draw(core)
-    for i in range(8):
-        r = (30 + i * 22) * S
-        a = int(70 * (1 - i / 8) ** 1.6)
-        cd.ellipse([nx0 - r, ny0 - r * 0.8, nx0 + r, ny0 + r * 0.8],
-                   fill=(190, 240, 255, a))
-    core = core.filter(ImageFilter.GaussianBlur(6 * SS))
-
-    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    layer = Image.alpha_composite(layer, core)
-    layer = Image.alpha_composite(layer, sheets)
-    layer = Image.alpha_composite(layer, drops)
-    return layer
+def whale_outline():
+    """Closed polygon: top edge tail->snout, rounded snout, bottom edge back."""
+    n = 160
+    top, bot = [], []
+    for i in range(n + 1):
+        t = i / n
+        x, y = whale_path(t)
+        nx, ny = whale_normal(t)
+        th = thickness(t)
+        top.append((x + nx * th, y + ny * th))
+        bot.append((x - nx * th, y - ny * th))
+    # rounded snout: arc sweeping from the top side around to the bottom side
+    sx, sy = whale_path(1.0)
+    nx, ny = whale_normal(1.0)
+    tx, ty = -ny, nx  # tangent from top side to bottom side at the head
+    r = thickness(1.0) * 0.9
+    snout = []
+    for a in range(10, 171, 8):
+        ang = math.radians(a)
+        px = sx + nx * r * math.cos(ang) + tx * r * math.sin(ang)
+        py = sy + ny * r * math.cos(ang) + ty * r * math.sin(ang)
+        snout.append((px, py))
+    return top + snout + bot[::-1], top, bot
 
 
-def ocean(w, h, horizon_y):
-    """Dark sea with shimmering dash reflections (no banding)."""
-    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    d.rectangle([0, horizon_y, w, h], fill=(8, 16, 30, 255))
-    S = w / 1024.0
+def draw_whale_layers():
+    """Return (rim, fill, mask) layers for the whale body."""
+    body, top, bot = whale_outline()
 
-    def shimmer(cx, color, spread, density, fade):
-        y = horizon_y + 4
-        while y < h - 2:
-            depth = (y - horizon_y) / (h - horizon_y)
-            n = max(1, int(density * (0.4 + depth)))
-            for _ in range(n):
-                lx = RND.gauss(cx, spread * (0.5 + depth))
-                ln = RND.uniform(6, 42) * S * (0.5 + depth)
-                al = int(fade * (1 - depth) ** 1.4 * RND.uniform(0.3, 1.0))
-                if al > 6:
-                    d.line([(lx - ln, y), (lx + ln, y)],
-                           fill=color + (al,), width=max(1, int(1.6 * S)))
-            y += RND.uniform(3, 9) * S
+    rim = Image.new("RGB", (W, H), (0, 0, 0))
+    rd = ImageDraw.Draw(rim)
+    n = len(top) - 1
+    for i in range(n):
+        t0 = i / n
+        b = 0.5 + 0.5 * math.sin(math.pi * t0)
+        c = lerp((70, 150, 255), (190, 240, 255), b)
+        rd.line([top[i], top[i + 1]], fill=c, width=5)
+        c2 = lerp((50, 110, 220), (110, 190, 255), b)
+        rd.line([bot[i], bot[i + 1]], fill=c2, width=3)
+    rd.line(body + [body[0]], fill=(60, 120, 230), width=3)
 
-    # reflected whale glow
-    shimmer(P0[0] * w * 0.7 + w * 0.18, (90, 220, 255), w * 0.10, 5, 90)
-    # moon glitter path
-    shimmer(w * 0.80, (215, 232, 248), w * 0.025, 3, 70)
-    layer = layer.filter(ImageFilter.GaussianBlur(0.6 * SS))
-    return layer
+    # body gradient fill: bright moonlit top, deep blue belly
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).polygon(body, fill=255)
+    ylo = int(min(p[1] for p in body))
+    yhi = int(max(p[1] for p in body))
+    grad = vgrad((W, yhi - ylo + 1), [
+        (0.00, (110, 190, 255)),
+        (0.35, (56, 110, 200)),
+        (0.75, (30, 60, 130)),
+        (1.00, (16, 34, 84)),
+    ])
+    fill = Image.new("RGB", (W, H), (0, 0, 0))
+    fill.paste(grad, (0, ylo))
+
+    # glowing eye
+    ex, ey = whale_path(0.9)
+    enx, eny = whale_normal(0.9)
+    off = thickness(0.9) * 0.45
+    ex, ey = ex + enx * off, ey + eny * off
+    fd = ImageDraw.Draw(fill)
+    fd.ellipse([ex - 6, ey - 6, ex + 6, ey + 6], fill=(210, 240, 255))
+    fd.ellipse([ex - 3, ey - 3, ex + 3, ey + 3], fill=(120, 220, 255))
+
+    return rim, fill, mask
 
 
-def vignette(img):
-    w, h = img.size
-    mask = Image.new("L", (w, h), 0)
-    d = ImageDraw.Draw(mask)
-    d.ellipse([-w * 0.18, -h * 0.18, w * 1.18, h * 1.18], fill=255)
-    mask = mask.filter(ImageFilter.GaussianBlur(120 * SS))
-    dark = Image.new("RGB", (w, h), (2, 4, 10))
-    return Image.composite(img, dark, mask)
+def aurora_layer():
+    band = Image.new("RGB", (W, H), (0, 0, 0))
+    bd = ImageDraw.Draw(band)
+    for k, (col, amp, yc, width) in enumerate([
+        ((60, 240, 180), 60, 130, 70),
+        ((90, 140, 255), 80, 210, 55),
+        ((170, 100, 255), 55, 80, 45),
+    ]):
+        for x in range(0, W, 3):
+            yy = yc + amp * math.sin(x / 170 + k * 2.1) + 16 * math.sin(x / 51 + k)
+            c = tuple(int(c * (0.65 + 0.35 * math.sin(x / 90 + k))) for c in col)
+            bd.line([x, yy, x, yy + width], fill=c)
+    return band.filter(ImageFilter.GaussianBlur(16))
 
 
 def main():
-    w = h = SIZE * SS
-    horizon_y = int(h * 0.74)
+    img = vgrad((W, H), [
+        (0.00, (3, 5, 18)),
+        (0.35, (9, 15, 42)),
+        (0.52, (18, 32, 68)),
+        (0.555, (26, 52, 100)),
+        (0.60, (14, 28, 62)),
+        (0.80, (8, 16, 40)),
+        (1.00, (2, 4, 14)),
+    ]).convert("RGB")
+    draw = ImageDraw.Draw(img)
 
-    img = sky_gradient(w, h).convert("RGBA")
-    img = Image.alpha_composite(img, draw_stars(w, h, horizon_y))
-    img = Image.alpha_composite(img, aurora_ribbons(w, h, horizon_y))
-    img = Image.alpha_composite(img, draw_moon(w, h))
-    img = Image.alpha_composite(img, ocean(w, h, horizon_y))
-    img = Image.alpha_composite(img, whale(w, h, horizon_y))
-    img = Image.alpha_composite(img, splash(w, h, horizon_y))
+    # --- stars ---
+    for _ in range(320):
+        x = rng.randint(0, W - 1)
+        y = rng.randint(0, HORIZON - 60)
+        b = rng.uniform(0.2, 1.0)
+        c = lerp((50, 70, 120), (255, 255, 255), b)
+        r = 1 if b < 0.85 else 2
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=c)
 
-    img = img.convert("RGB").resize((SIZE, SIZE), Image.LANCZOS)
-    img = vignette(img)
+    # --- aurora ---
+    img = add_glow(img, aurora_layer(), 0.7)
+    draw = ImageDraw.Draw(img)
+
+    # --- moon with soft halo ---
+    mx, my, mr = 780, 140, 54
+    halo = Image.new("RGB", (W, H), (0, 0, 0))
+    ImageDraw.Draw(halo).ellipse(
+        [mx - mr, my - mr, mx + mr, my + mr], fill=(255, 248, 225))
+    img = add_glow(img, halo.filter(ImageFilter.GaussianBlur(26)), 0.55)
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([mx - mr, my - mr, mx + mr, my + mr], fill=(255, 252, 240))
+
+    # --- sea: subtle horizontal swell shading ---
+    for y in range(HORIZON, H, 2):
+        t = (y - HORIZON) / (H - HORIZON)
+        c = lerp((24, 44, 92), (6, 12, 34), t)
+        draw.line([0, y, W, y], fill=c)
+
+    # --- moonlight path: shimmering dashes only (no solid wedge) ---
+    for _ in range(1500):
+        t = rng.random() ** 1.6
+        y = HORIZON + t * (H - HORIZON)
+        if y < HORIZON + 18:
+            continue  # let the glow-beneath-whale own the horizon band
+        wcol = 40 + 240 * t
+        sx = mx + rng.uniform(-wcol / 2, wcol / 2)
+        sw = rng.uniform(4, 8 + 26 * t)
+        b = rng.uniform(0.15, 0.95) * (1 - 0.45 * t) * min(1.0, (y - HORIZON) / 120)
+        c = lerp((40, 70, 130), (210, 230, 255), b)
+        draw.line([sx, y, sx + sw, y], fill=c)
+
+    # --- whale ---
+    rim, fill, mask = draw_whale_layers()
+    body_glow = ImageChops.screen(rim.filter(ImageFilter.GaussianBlur(14)),
+                                  rim.filter(ImageFilter.GaussianBlur(3)))
+    img = add_glow(img, body_glow, 0.9)
+    img.paste(fill, (0, 0), mask)
+    img = add_glow(img, rim.filter(ImageFilter.GaussianBlur(2)), 0.6)
+    draw = ImageDraw.Draw(img)
+
+    # --- splash crown where the tail tore the water ---
+    tx, ty = whale_path(0)
+    crown = Image.new("RGB", (W, H), (0, 0, 0))
+    crd = ImageDraw.Draw(crown)
+    for _ in range(520):
+        ang = rng.uniform(-math.pi * 0.95, -math.pi * 0.05)
+        sp = rng.uniform(10, 260)
+        px = tx + sp * math.cos(ang) * 1.7
+        py = ty + sp * math.sin(ang) * 1.1
+        if 0 <= px < W and 0 <= py < HORIZON + 40:
+            b = rng.uniform(0.4, 1.0)
+            r = rng.choice([1, 1, 2, 2, 3])
+            crd.ellipse([px - r, py - r, px + r, py + r],
+                        fill=lerp((90, 170, 255), (255, 255, 255), b))
+    core = Image.new("RGB", (W, H), (0, 0, 0))
+    ImageDraw.Draw(core).ellipse(
+        [tx - 34, ty - 22, tx + 34, ty + 22], fill=(90, 160, 235))
+    img = add_glow(img, crown.filter(ImageFilter.GaussianBlur(1)), 0.9)
+    img = add_glow(img, core.filter(ImageFilter.GaussianBlur(10)), 0.7)
+    draw = ImageDraw.Draw(img)
+
+    # --- glowing water pouring off the belly, falling toward the sea ---
+    for _ in range(150):
+        t = rng.uniform(0.15, 0.92)
+        x, y = whale_path(t)
+        nx, ny = whale_normal(t)
+        d = thickness(t) + rng.uniform(2, 20)
+        px, py = x - nx * d, y - ny * d
+        fall = rng.uniform(10, 150) * min(1.0, py / HORIZON)
+        ex, ey = px + fall * 0.4, py + fall
+        if ey < H:
+            w = rng.choice([1, 1, 2])
+            c = lerp((120, 190, 255), (255, 255, 255), rng.uniform(0.4, 1.0))
+            draw.line([px, py, ex, ey], fill=c, width=w)
+
+    # --- horizon + glow beneath the whale ---
+    draw.line([0, HORIZON, W, HORIZON], fill=(70, 105, 160), width=2)
+    under = Image.new("RGB", (W, H), (0, 0, 0))
+    ud = ImageDraw.Draw(under)
+    for i in range(0, 91, 3):
+        t = i / 90
+        x, _ = whale_path(t)
+        ud.ellipse([x - 34, HORIZON + 8, x + 34, HORIZON + 24],
+                   fill=(80, 160, 255))
+    img = add_glow(img, under.filter(ImageFilter.GaussianBlur(16)), 0.6)
 
     os.makedirs("/output", exist_ok=True)
     out = "/output/entry.png"
-    img.save(out, "PNG", optimize=True)
-    try:
-        repo = os.path.dirname(os.path.abspath(__file__))
-        img.save(os.path.join(repo, "preview.png"), "PNG", optimize=True)
-    except OSError:
-        pass
-    print("wrote", out, os.path.getsize(out), "bytes")
+    img.save(out, optimize=True)
+    print("saved", out, os.path.getsize(out), "bytes")
 
 
 if __name__ == "__main__":
